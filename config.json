@@ -1,0 +1,40 @@
+{
+  "telegram": {
+    "api_id": 20068122,
+    "api_hash": "28a2c1b0cd1c6d3770b7df0048ee7a36",
+    "channels": [
+      {
+        "enabled": true,
+        "identifier": "Back to it"
+      },
+      {
+        "enabled": false,
+        "identifier": ""
+      }
+    ],
+    "session_name": "bot_session",
+    "sticker_up_id": 6086622068986614000,
+    "sticker_down_id": 6084556812487496000
+  },
+  "quotex": {
+    "email": "judesilas7777@gmail.com",
+    "password": "Jude3377",
+    "wait_between_trades": 30,
+    "login_wait_minutes": 1
+  },
+  "trading": {
+    "account_type": "demo",
+    "risk_mode": "fixed",
+    "risk_amount": 1,
+    "max_daily_trades": 10,
+    "max_daily_loss": 50,
+    "max_concurrent_trades": 8,
+    "martingale_enabled": false,
+    "martingale_multiplier": 2,
+    "martingale_max_steps": 5
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_file": "quotex_bot.log"
+  }
+}
