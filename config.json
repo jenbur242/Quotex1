@@ -1,11 +1,11 @@
 {
   "telegram": {
-    "api_id": 20068122,
-    "api_hash": "28a2c1b0cd1c6d3770b7df0048ee7a36",
+    "api_id": 0000000,
+    "api_hash": "000000000000",
     "channels": [
       {
         "enabled": true,
-        "identifier": "Back to it"
+        "identifier": ""
       },
       {
         "enabled": false,
@@ -17,8 +17,8 @@
     "sticker_down_id": 6084556812487496016
   },
   "quotex": {
-    "email": "judesilas7777@gmail.com",
-    "password": "Jude3377",
+    "email": "44@gmail.com",
+    "password": "000",
     "wait_between_trades": 30,
     "login_wait_minutes": 1
   },
@@ -26,12 +26,12 @@
     "account_type": "demo",
     "risk_mode": "fixed",
     "risk_amount": 10,
-    "max_daily_trades": 10,
+    "max_daily_trades": 20,
     "max_daily_loss": 50,
     "max_concurrent_trades": 8,
     "martingale_enabled": false,
     "martingale_multiplier": 2,
-    "martingale_max_steps": 5
+    "martingale_max_steps": 3
   },
   "logging": {
     "log_level": "INFO",
