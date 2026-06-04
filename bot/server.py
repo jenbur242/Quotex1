@@ -79,6 +79,23 @@ def _read_json(path: Path, default=None):
     return default if default is not None else {}
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """
+    Recursively merge override into base. Nested dicts are merged; lists and
+    scalars in override replace those in base. This lets the dashboard send only
+    the fields it edits while everything else already in config.json is preserved
+    exactly — in particular the 19-digit Telegram sticker IDs, which JavaScript
+    cannot represent without rounding and would otherwise be corrupted on save.
+    """
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def get_bot_state() -> dict:
     """Return live bot state — reads directly from the running TradingBot instance."""
     bot = _bot_instance
@@ -141,14 +158,23 @@ def api_status():
 
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
-    return jsonify(_read_json(BASE_DIR / "config.json"))
+    # no-store so the dashboard always reflects the live config.json and never a
+    # cached copy — otherwise edits made directly on disk wouldn't show up.
+    resp = jsonify(_read_json(BASE_DIR / "config.json"))
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
     try:
         data = request.get_json(force=True)
-        (BASE_DIR / "config.json").write_text(json.dumps(data, indent=2))
+        # Merge over the existing file so fields the dashboard doesn't send are
+        # preserved exactly (e.g. the large sticker IDs). Whatever the form does
+        # send overwrites the matching keys — so frontend edits land in config.json.
+        existing = _read_json(BASE_DIR / "config.json", {})
+        merged = _deep_merge(existing, data)
+        (BASE_DIR / "config.json").write_text(json.dumps(merged, indent=2))
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500

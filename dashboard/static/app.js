@@ -45,6 +45,9 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.dataset.tab;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === target));
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + target));
+    // Re-read config.json each time Settings is opened so the form always shows
+    // the live values (e.g. after an external edit), never a stale page-load copy.
+    if (target === 'settings') loadSettings();
   });
 });
 
@@ -535,14 +538,13 @@ async function saveSettings() {
 function buildConfigFromForm() {
   return {
     telegram: {
-      // Visible fields
+      // Only the fields the UI edits are sent. The server deep-merges this over
+      // the existing config.json, so session_name and the 19-digit sticker IDs
+      // are preserved on disk — never round-tripped through JS (which would round
+      // them) and never overwritten here.
       api_id:   parseInt($('s-api-id').value)  || 0,
       api_hash: $('s-api-hash').value.trim(),
       channels: getChannelsFromDOM(),
-      // Hardcoded — preserved from loaded config, not editable in UI
-      session_name:    (_loadedConfig.telegram?.session_name    ?? 'quotex_bot_session'),
-      sticker_up_id:   (_loadedConfig.telegram?.sticker_up_id   ?? 0),
-      sticker_down_id: (_loadedConfig.telegram?.sticker_down_id ?? 0),
     },
     quotex: {
       email:               $('s-qx-email').value.trim(),
@@ -598,7 +600,7 @@ function showToast(msg, type = 'info') {
 // ── API helper ────────────────────────────────────────────
 async function api(method, url, body) {
   try {
-    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    const opts = { method, headers: { 'Content-Type': 'application/json' }, cache: 'no-store' };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
     return res.json();
