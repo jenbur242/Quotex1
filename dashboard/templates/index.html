@@ -121,7 +121,7 @@
               <div class="conn-detail">Receives signals from your channels</div>
             </div>
             <div class="conn-badge disconnected" id="tg-badge">
-              <div class="status-dot"></div>Disconnected
+              <div class="status-dot"></div>Offline
             </div>
             <button class="btn btn-ghost btn-sm" id="btn-tg-connect">Connect</button>
           </div>
@@ -200,6 +200,14 @@
               <input class="form-input" id="s-max-concurrent" type="number" min="1" placeholder="1">
             </div>
           </div>
+          <div class="divider"></div>
+          <div class="toggle-row">
+            <span class="toggle-label">Enforce Max Daily Loss limit</span>
+            <label class="toggle">
+              <input type="checkbox" id="s-max-loss-enabled">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -221,8 +229,12 @@
                 <input class="form-input" id="s-martingale-mult" type="number" min="1.1" step="0.1" placeholder="2.0">
               </div>
               <div class="form-group">
-                <label class="form-label">Max Steps (safety reset)</label>
-                <input class="form-input" id="s-martingale-steps" type="number" min="1" placeholder="5">
+                <label class="form-label">Steps per Cycle (same pair)</label>
+                <input class="form-input" id="s-martingale-steps" type="number" min="1" placeholder="2">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Cycles (across signals)</label>
+                <input class="form-input" id="s-martingale-cycles" type="number" min="1" placeholder="3">
               </div>
             </div>
           </div>
@@ -245,6 +257,10 @@
             <div class="form-group">
               <label class="form-label">Cooldown Between Trades (sec)</label>
               <input class="form-input" id="s-wait-trades" type="number" min="0" placeholder="30">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Early Entry (sec)</label>
+              <input class="form-input" id="s-early-entry" type="number" min="0" placeholder="3">
             </div>
           </div>
           <div class="modal-info" style="margin-top:12px;">

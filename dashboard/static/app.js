@@ -225,9 +225,9 @@ socket.on('log', d => addLog(d.time || now(), d.message, d.level || 'INFO'));
 // ── Connection badges ─────────────────────────────────────
 function updateConnectionBadges(conn) {
   state.connections = conn;
-  setConnBadge('tg-badge',     conn.telegram, 'Connected', 'Disconnected');
+  setConnBadge('tg-badge',     conn.telegram, 'Connected', 'Offline');
   setConnBadge('qx-badge',     conn.quotex,   'Connected', 'Offline');
-  setConnBadge('tg-badge-hdr', conn.telegram, 'Connected', 'Disconnected');
+  setConnBadge('tg-badge-hdr', conn.telegram, 'Connected', 'Offline');
   setConnBadge('qx-badge-hdr', conn.quotex,   'Connected', 'Offline');
   refreshAlert();
 }
@@ -434,6 +434,7 @@ async function loadSettings() {
   setValue('s-qx-email',    q.email    || '');
   setValue('s-qx-password', q.password || '');
   setValue('s-wait-trades', q.wait_between_trades ?? 30);
+  setValue('s-early-entry', q.early_entry_seconds ?? 3);
 
   // Trading
   setValue('s-account-type', tr.account_type || 'demo');
@@ -442,12 +443,15 @@ async function loadSettings() {
   setValue('s-risk-amount',  tr.risk_amount  ?? 1);
   setValue('s-max-trades',   tr.max_daily_trades   ?? 10);
   setValue('s-max-loss',     tr.max_daily_loss     ?? 50);
+  setChecked('s-max-loss-enabled', tr.max_daily_loss_enabled ?? true);
+  toggleMaxLossField(tr.max_daily_loss_enabled ?? true);
   setValue('s-max-concurrent', tr.max_concurrent_trades ?? 1);
 
   // Martingale
   setChecked('s-martingale-enabled', tr.martingale_enabled || false);
-  setValue('s-martingale-mult',  tr.martingale_multiplier ?? 2.0);
-  setValue('s-martingale-steps', tr.martingale_max_steps  ?? 5);
+  setValue('s-martingale-mult',   tr.martingale_multiplier ?? 2.0);
+  setValue('s-martingale-steps',  tr.martingale_steps  ?? 2);
+  setValue('s-martingale-cycles', tr.martingale_cycles ?? 3);
   toggleMartingaleFields(tr.martingale_enabled || false);
 
   // Logging
@@ -504,6 +508,18 @@ function toggleMartingaleFields(on) {
   $('martingale-fields').style.display = on ? '' : 'none';
 }
 
+// Daily-loss limit on/off — grey out the amount field when disabled.
+$('s-max-loss-enabled')?.addEventListener('change', function () {
+  toggleMaxLossField(this.checked);
+});
+
+function toggleMaxLossField(on) {
+  const inp = $('s-max-loss');
+  if (!inp) return;
+  inp.disabled = !on;
+  inp.style.opacity = on ? '' : '0.45';
+}
+
 // When risk mode is "% of balance", risk amount, daily loss (and P&L) are all
 // percentages — relabel the settings inputs so the units match.
 $('s-risk-mode')?.addEventListener('change', function () {
@@ -550,6 +566,7 @@ function buildConfigFromForm() {
       email:               $('s-qx-email').value.trim(),
       password:            $('s-qx-password').value,
       wait_between_trades: parseInt($('s-wait-trades').value) || 30,
+      early_entry_seconds: Math.max(0, parseInt($('s-early-entry').value) || 0),
       // login_wait_minutes preserved from loaded config (not exposed in UI)
       login_wait_minutes:  (_loadedConfig.quotex?.login_wait_minutes ?? 1),
     },
@@ -559,10 +576,12 @@ function buildConfigFromForm() {
       risk_amount:           parseFloat($('s-risk-amount').value) || 1,
       max_daily_trades:      parseInt($('s-max-trades').value)   || 10,
       max_daily_loss:        parseFloat($('s-max-loss').value)   || 50,
+      max_daily_loss_enabled: $('s-max-loss-enabled').checked,
       max_concurrent_trades: parseInt($('s-max-concurrent').value) || 1,
       martingale_enabled:    $('s-martingale-enabled').checked,
       martingale_multiplier: parseFloat($('s-martingale-mult').value)  || 2.0,
-      martingale_max_steps:  parseInt($('s-martingale-steps').value)   || 5,
+      martingale_steps:      parseInt($('s-martingale-steps').value)   || 2,
+      martingale_cycles:     parseInt($('s-martingale-cycles').value)  || 3,
     },
     logging: {
       log_level: $('s-log-level').value,

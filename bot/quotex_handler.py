@@ -37,8 +37,9 @@ class QuotexHandler:
         self.active_trades = 0
         self._trade_date = None
         self._day_start_balance: Optional[float] = None   # balance snapshot at 00:00
-        self._martingale_amount: float = 0.0
-        self._martingale_step: int = 0
+        # Martingale progression that PERSISTS across signals/cycles:
+        self._mg_amount: Optional[float] = None   # carried amount for the next cycle's first trade (None = base)
+        self._mg_losses: int = 0                  # consecutive losses so far in the current progression
         self.driver = None  # kept for interface compatibility with SignalExecutor
 
     # ─────────────────────────────────────────────────────────
@@ -208,7 +209,12 @@ class QuotexHandler:
         With the API there is no UI to pre-fill; just calculate and return the
         amount so it is ready the moment the entry time arrives.
         """
-        amount = await self._calc_amount()
+        # If a martingale progression is carried over from a previous (lost) cycle,
+        # this signal's first trade uses the carried amount, not the base.
+        if self.config.trading.martingale_enabled and self._mg_amount:
+            amount = self._mg_amount
+        else:
+            amount = await self._calc_amount()
         self.logger.info(
             f"Pre-configured: ${amount:.2f} | expiry: {expiry or '00:01:00'} "
             f"— ready, waiting for entry time."
@@ -220,10 +226,11 @@ class QuotexHandler:
     # ─────────────────────────────────────────────────────────
 
     async def _calc_amount(self) -> float:
-        """Calculate trade amount: martingale override → percent of balance → fixed."""
-        if self.config.trading.martingale_enabled and self._martingale_amount > 0:
-            return self._martingale_amount
-
+        """
+        Calculate the BASE trade amount: percent of balance, or fixed dollars.
+        Martingale step sizing (doubling) is handled by the recovery loop in
+        perform_trade(), not here — this always returns the cycle-1 base.
+        """
         if self.config.trading.risk_mode == "percent":
             try:
                 balance = await self.client.get_balance()
@@ -337,48 +344,99 @@ class QuotexHandler:
             f"Stats: {self.wins}W / {self.losses}L  |  last trade profit: ${profit:.2f}"
         )
 
-    async def _settle_trade(self, order_id: Any, duration_secs: int, trade_amount: float):
-        """
-        Settle a single trade: wait for it to close, record win/loss + P&L for
-        EVERY trade (each trade is individual), then advance martingale if enabled.
-        Used for all trades — inline when martingale needs the result before the
-        next trade is sized, otherwise run as a background task.
-        """
+    async def _settle_and_record(self, order_id: Any, duration_secs: int):
+        """Background settle: wait for the trade to close, record win/loss + P&L."""
         won, profit = await self._get_trade_result(order_id, duration_secs)
         self._record_result(won, profit)
-        if self.config.trading.martingale_enabled:
-            self._update_martingale(won, trade_amount)
-        # Refresh realized daily P&L / drawdown from the post-settlement balance.
         await self._refresh_balance_stats()
 
-    def _update_martingale(self, won: Optional[bool], last_amount: float):
-        if won is True:
-            self._martingale_amount = 0.0
-            self._martingale_step   = 0
-            self.logger.info(
-                f"Martingale: WIN — reset to base ${self.config.trading.risk_amount:.2f}"
+    def _mg_reset(self):
+        """Reset the martingale progression back to Cycle 1 / base amount."""
+        self._mg_amount = None
+        self._mg_losses = 0
+
+    async def _place_one(
+        self,
+        asset_name: str,
+        direction: str,
+        period_secs: int,
+        amount: float,
+        expiry: Optional[str],
+        wait_result: bool,
+    ):
+        """
+        Place a single trade and optionally wait for its result.
+        Returns (placed, won):
+          placed = False        → the order never went on (timeout / rejected)
+          won    = True/False/None when wait_result is True; always None otherwise
+        """
+        self.logger.info(
+            f"Placing trade: {asset_name} {direction.upper()} "
+            f"${amount:.2f}  timeframe: {period_secs}s  (closes on next :00 boundary)"
+        )
+
+        # Signals come from Telegram, not from price data, so the realtime price
+        # stream is NOT needed to decide a trade. buy() would otherwise block in
+        # start_realtime_price() waiting for live ticks and time out valid trades.
+        # Seed one price entry so that check passes instantly and the order is sent
+        # immediately on the already-selected pair. (buy() ignores the value — the
+        # broker fills at its own market price; this only skips the pointless wait.)
+        try:
+            self.client.api.realtime_price.setdefault(asset_name, []).append(
+                {"time": 0, "price": 0}
             )
-        elif won is False:
-            next_step = self._martingale_step + 1
-            max_steps = self.config.trading.martingale_max_steps
-            if next_step > max_steps:
-                self._martingale_amount = 0.0
-                self._martingale_step   = 0
-                self.logger.warning(
-                    f"Martingale: LOSS — max steps ({max_steps}) reached, "
-                    f"resetting to base ${self.config.trading.risk_amount:.2f}"
-                )
-            else:
-                self._martingale_step   = next_step
-                self._martingale_amount = round(
-                    last_amount * self.config.trading.martingale_multiplier, 2
-                )
-                self.logger.info(
-                    f"Martingale: LOSS — step {self._martingale_step}/{max_steps}, "
-                    f"next: ${self._martingale_amount:.2f}"
-                )
-        else:
-            self.logger.warning("Martingale: result unknown — keeping current amount.")
+        except Exception as _e:
+            self.logger.debug(f"Could not seed price stream: {_e}")
+
+        # time_mode="TURBO": fixed-time option (optionType 1) with an ABSOLUTE
+        # candle-aligned expiry, so it closes exactly on a :00 boundary. Bounded
+        # timeout so a stuck buy() can't hold the concurrency slot forever — but
+        # generous enough to receive the order confirmation.
+        try:
+            status, buy_info = await asyncio.wait_for(
+                self.client.buy(amount, asset_name, direction, period_secs, time_mode="TURBO"),
+                timeout=20,
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(
+                f"Trade NOT placed for {asset_name} — no order confirmation from "
+                f"Quotex within 20s."
+            )
+            return False, None
+
+        if not status:
+            self.logger.error(f"Trade rejected by Quotex — NOT placed: {buy_info}")
+            return False, None
+
+        self.last_trade_time = datetime.now()
+        self.daily_trades   += 1
+        order_id = buy_info.get("id") if isinstance(buy_info, dict) else None
+        self.logger.info(
+            f"Trade #{self.daily_trades} placed — {asset_name} {direction.upper()} "
+            f"${amount:.2f} | id={order_id} "
+            f"| Daily: {self.daily_trades}/{self.config.trading.max_daily_trades}"
+        )
+        import json as _json, logging as _logging
+        _logging.getLogger('trades').info(
+            f"QUOTEX_TRADE_EXECUTED | {_json.dumps({'asset': asset_name, 'direction': direction, 'amount': amount, 'expiry': expiry, 'order_id': str(order_id)})}"
+        )
+
+        if order_id is None:
+            self.logger.warning(
+                "Trade placed but broker returned no order id — win/loss not trackable."
+            )
+            return True, None
+
+        # check_win timeout: the aligned close can be up to ~2 candles away.
+        result_timeout = period_secs * 2 + 30
+        if wait_result:
+            won, profit = await self._get_trade_result(order_id, result_timeout)
+            self._record_result(won, profit)
+            await self._refresh_balance_stats()
+            return True, won
+        # Non-martingale: record in the background so the next signal isn't delayed.
+        asyncio.ensure_future(self._settle_and_record(order_id, result_timeout))
+        return True, None
 
     # ─────────────────────────────────────────────────────────
     #  MAIN TRADE FLOW
@@ -405,7 +463,8 @@ class QuotexHandler:
             )
             return False
 
-        if self.daily_loss >= self.config.trading.max_daily_loss:
+        if (self.config.trading.max_daily_loss_enabled
+                and self.daily_loss >= self.config.trading.max_daily_loss):
             self.logger.warning(
                 f"Daily loss limit reached ({self.daily_loss:.2f}{loss_unit} "
                 f">= {self.config.trading.max_daily_loss:.2f}{loss_unit}). Skipping."
@@ -442,98 +501,104 @@ class QuotexHandler:
                 await asyncio.sleep(cooldown)
 
         try:
-            trade_amount  = (
+            base_amount = (
                 pre_configured_amount
                 if pre_configured_amount is not None
                 else await self._calc_amount()
             )
             period_secs = self._expiry_to_seconds(expiry or "00:01:00")   # M1=60, M5=300
 
-            # ── Pre-warm: start price stream before buy() polls for it ────────
-            # buy() calls start_realtime_price() which only succeeds after the
-            # server receives settings/apply with the current asset symbol.
-            # Sending it here gives ticks time to arrive within the 30s window.
-            # Use the timeframe period (candle size) for the candle subscription.
-            try:
-                await self.client.api.settings_apply(
-                    asset_name, period_secs, is_fast_option=False
+            # ── No martingale: place once, settle in the background ───────────
+            if not self.config.trading.martingale_enabled:
+                placed, _ = await self._place_one(
+                    asset_name, direction, period_secs, base_amount, expiry,
+                    wait_result=False,
                 )
-                await self.client.start_candles_stream(asset_name, period_secs)
-                await asyncio.sleep(1)
-            except Exception as _e:
-                self.logger.debug(f"Pre-warm skipped: {_e}")
+                return placed
 
-            self.logger.info(
-                f"Placing trade: {asset_name} {direction.upper()} "
-                f"${trade_amount:.2f}  timeframe: {period_secs}s  "
-                f"(closes on next :00 boundary)"
-            )
+            # ── Auto-Martingale: one CYCLE per signal, continued across signals ──
+            # This signal is ONE cycle. Place up to `steps` trades on THIS pair:
+            # on a loss, auto re-enter the SAME pair on the next candle at ×mult.
+            # If the whole cycle loses, the doubled amount is CARRIED to the NEXT
+            # Telegram signal (a new cycle on its own pair). A WIN anywhere resets
+            # to base. After `cycles` cycles all lose (steps×cycles trades), reset.
+            #   C1 EURJPY 10→20 (lose) | C2 EURUSD 40→80 (lose) | C3 … 160→320 (win)
+            mult      = self.config.trading.martingale_multiplier
+            steps     = max(1, int(self.config.trading.martingale_steps))
+            cycles    = max(1, int(self.config.trading.martingale_cycles))
+            max_total = steps * cycles
 
-            # time_mode="TIME" makes pyquotex send an ABSOLUTE, candle-aligned
-            # expiration (get_expiration_time_quotex), so the trade closes exactly
-            # on a :00 boundary regardless of order/open latency. TIMER mode used a
-            # relative countdown from the open, which drifted ~2s past the :00.
-            # The order is placed ~3s before the entry, so the aligned expiry lands
-            # one full candle later — e.g. M1 entry 00:01:00 → close 00:02:00.
-            #
-            # Hard timeout so a stuck buy() (asset went unavailable after the
-            # pre-check, network stall, etc.) can never hold the slot forever.
-            try:
-                status, buy_info = await asyncio.wait_for(
-                    self.client.buy(
-                        trade_amount, asset_name, direction, period_secs,
-                        time_mode="TIME",
-                    ),
-                    timeout=30,
+            # First trade of this cycle: carried amount if a prior cycle lost, else base.
+            amount = self._mg_amount if self._mg_amount else base_amount
+
+            for step_in_cycle in range(1, steps + 1):
+                placed, won = await self._place_one(
+                    asset_name, direction, period_secs, amount, expiry,
+                    wait_result=True,
                 )
-            except asyncio.TimeoutError:
-                self.logger.error(
-                    f"Trade placement TIMED OUT for {asset_name} after 30s — "
-                    f"asset likely unavailable. Trade NOT placed."
+                if not placed:
+                    # Couldn't place — leave progression state untouched for next time.
+                    return step_in_cycle > 1
+
+                if won is True:
+                    self.logger.info(
+                        f"Martingale: WIN at ${amount:.2f} — recovered, reset to base "
+                        f"${base_amount:.2f}."
+                    )
+                    self._mg_reset()
+                    return True
+                if won is None:
+                    self.logger.warning(
+                        "Martingale: result unknown — stopping (progression unchanged)."
+                    )
+                    return True
+
+                # ── Loss → double the amount ──
+                self._mg_losses += 1
+                amount = round(amount * mult, 2)
+
+                if self._mg_losses >= max_total:
+                    self.logger.warning(
+                        f"Martingale: {max_total} losses ({cycles} cycles) reached — "
+                        f"giving up, reset to base ${base_amount:.2f}."
+                    )
+                    self._mg_reset()
+                    return True
+
+                # Respect daily caps before any further trade — carry to next signal.
+                if self.daily_trades >= self.config.trading.max_daily_trades:
+                    self._mg_amount = amount
+                    self.logger.warning(
+                        f"Martingale: daily trade limit reached — carrying ${amount:.2f} "
+                        f"to the next signal."
+                    )
+                    return True
+                if (self.config.trading.max_daily_loss_enabled
+                        and self.daily_loss >= self.config.trading.max_daily_loss):
+                    self._mg_amount = amount
+                    self.logger.warning(
+                        f"Martingale: daily loss limit reached — carrying ${amount:.2f} "
+                        f"to the next signal."
+                    )
+                    return True
+
+                if step_in_cycle < steps:
+                    # Still inside this cycle → auto re-enter the SAME pair next candle.
+                    self.logger.info(
+                        f"Martingale: LOSS — re-entering {asset_name} {direction.upper()} "
+                        f"on the next candle (cycle step {step_in_cycle + 1}/{steps}) "
+                        f"at ${amount:.2f}."
+                    )
+                    continue
+
+                # Cycle finished (all `steps` lost) → carry to the NEXT signal.
+                self._mg_amount = amount
+                cycle_no = self._mg_losses // steps
+                self.logger.info(
+                    f"Martingale: cycle {cycle_no}/{cycles} lost — next Telegram signal "
+                    f"will start at ${amount:.2f} (on its own pair)."
                 )
-                return False
-
-            if not status:
-                self.logger.error(f"Trade rejected by Quotex — NOT placed: {buy_info}")
-                return False
-
-            self.last_trade_time = datetime.now()
-            self.daily_trades   += 1
-
-            order_id = buy_info.get("id") if isinstance(buy_info, dict) else None
-            self.logger.info(
-                f"Trade #{self.daily_trades} placed — {asset_name} {direction.upper()} "
-                f"${trade_amount:.2f} | id={order_id} "
-                f"| Daily: {self.daily_trades}/{self.config.trading.max_daily_trades} "
-                f"| Daily loss: {self.daily_loss:.2f}{loss_unit}"
-                f"/{self.config.trading.max_daily_loss:.2f}{loss_unit}"
-            )
-
-            import json as _json, logging as _logging
-            _logging.getLogger('trades').info(
-                f"QUOTEX_TRADE_EXECUTED | {_json.dumps({'asset': asset_name, 'direction': direction, 'amount': trade_amount, 'expiry': expiry, 'order_id': str(order_id)})}"
-            )
-
-            # Every trade is settled and its win/loss + P&L recorded, regardless
-            # of martingale — each trade is tracked individually.
-            if order_id is not None:
-                # check_win timeout: the aligned close can be up to ~2 candles
-                # away from placement, so wait generously for the result.
-                result_timeout = period_secs * 2 + 30
-                settle = self._settle_trade(order_id, result_timeout, trade_amount)
-                if self.config.trading.martingale_enabled:
-                    # Wait inline: the result is needed before the next trade is sized.
-                    await settle
-                else:
-                    # Record in the background so the next signal isn't delayed.
-                    asyncio.ensure_future(settle)
-            else:
-                self.logger.warning(
-                    "Trade placed but broker returned no order id — "
-                    "win/loss cannot be tracked for this trade."
-                )
-
-            return True
+                return True
 
         except Exception as e:
             self.logger.error(f"Error placing trade on {symbol}: {e}")

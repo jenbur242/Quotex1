@@ -23,6 +23,7 @@ class QuotexConfig:
     password: str = ""
     login_wait_minutes: int = 1
     wait_between_trades: int = 30
+    early_entry_seconds: int = 3   # place the trade this many seconds before the signal's entry time
 
 
 @dataclass
@@ -44,10 +45,12 @@ class TradingConfig:
     risk_amount: float = 1.0            # Dollar amount OR percentage value (e.g. 5 = 5%)
     max_daily_trades: int = 10
     max_daily_loss: float = 50.0
+    max_daily_loss_enabled: bool = True   # when False, the daily-loss limit is not enforced
     max_concurrent_trades: int = 1
     martingale_enabled: bool = False
     martingale_multiplier: float = 2.0
-    martingale_max_steps: int = 5
+    martingale_steps: int = 2      # trades per cycle on the SAME pair (initial + auto recoveries)
+    martingale_cycles: int = 3     # cycles the doubling continues across signals before reset
     # expiry is intentionally absent — each signal format provides its own duration
 
 
@@ -78,6 +81,7 @@ class Config:
                     password=quotex_data.get('password', ''),
                     login_wait_minutes=quotex_data.get('login_wait_minutes', 1),
                     wait_between_trades=quotex_data.get('wait_between_trades', 30),
+                    early_entry_seconds=quotex_data.get('early_entry_seconds', 3),
                 )
 
                 tg_data = config_data.get('telegram', {})
@@ -104,10 +108,12 @@ class Config:
                     risk_amount=tr_data.get('risk_amount', 1.0),
                     max_daily_trades=tr_data.get('max_daily_trades', 10),
                     max_daily_loss=tr_data.get('max_daily_loss', 50.0),
+                    max_daily_loss_enabled=tr_data.get('max_daily_loss_enabled', True),
                     max_concurrent_trades=tr_data.get('max_concurrent_trades', 1),
                     martingale_enabled=tr_data.get('martingale_enabled', False),
                     martingale_multiplier=tr_data.get('martingale_multiplier', 2.0),
-                    martingale_max_steps=tr_data.get('martingale_max_steps', 5),
+                    martingale_steps=tr_data.get('martingale_steps', 2),
+                    martingale_cycles=tr_data.get('martingale_cycles', 3),
                 )
 
                 self.logging = LoggingConfig(**config_data.get('logging', {}))
@@ -135,6 +141,7 @@ class Config:
                     'password':           self.quotex.password,
                     'login_wait_minutes': self.quotex.login_wait_minutes,
                     'wait_between_trades': self.quotex.wait_between_trades,
+                    'early_entry_seconds': self.quotex.early_entry_seconds,
                 },
                 'telegram': {
                     'api_id':          self.telegram.api_id,
@@ -154,12 +161,14 @@ class Config:
                     'account_type':          self.trading.account_type,
                     'risk_mode':             self.trading.risk_mode,
                     'risk_amount':           self.trading.risk_amount,
-                    'max_daily_trades':      self.trading.max_daily_trades,
-                    'max_daily_loss':        self.trading.max_daily_loss,
-                    'max_concurrent_trades': self.trading.max_concurrent_trades,
+                    'max_daily_trades':         self.trading.max_daily_trades,
+                    'max_daily_loss':           self.trading.max_daily_loss,
+                    'max_daily_loss_enabled':   self.trading.max_daily_loss_enabled,
+                    'max_concurrent_trades':    self.trading.max_concurrent_trades,
                     'martingale_enabled':    self.trading.martingale_enabled,
                     'martingale_multiplier': self.trading.martingale_multiplier,
-                    'martingale_max_steps':  self.trading.martingale_max_steps,
+                    'martingale_steps':      self.trading.martingale_steps,
+                    'martingale_cycles':     self.trading.martingale_cycles,
                 },
                 'logging': self.logging.__dict__,
             }

@@ -257,19 +257,21 @@ class SignalExecutor:
                 except Exception as e:
                     self.logger.error(f"Pre-configure failed — will retry at entry time: {e}")
 
-            # ── Step 2: Wait until 3 s before entry time (onyx format) ──────
+            # ── Step 2: Wait until N s before entry time (onyx format) ──────
             if signal.get('entry_time'):
-                # Place 3 seconds early so the trade is live at the exact entry time
-                sleep_time = max(0.0, wait_secs - 3)
+                # Place a few seconds early so the trade is live at the exact entry
+                # time. The lead time is configurable (quotex.early_entry_seconds).
+                early = max(0, int(self.config.quotex.early_entry_seconds))
+                sleep_time = max(0.0, wait_secs - early)
                 if sleep_time > 0:
                     self.logger.info(
                         f"Pair {asset} selected. "
                         f"Waiting {sleep_time:.1f}s "
-                        f"(entering 3s before {signal['entry_time']})..."
+                        f"(entering {early}s before {signal['entry_time']})..."
                     )
                     await asyncio.sleep(sleep_time)
                 self.logger.info(
-                    f"Placing trade now — 3s before entry {signal['entry_time']}."
+                    f"Placing trade now — {early}s before entry {signal['entry_time']}."
                 )
 
             # ── Step 4: Place trade ───────────────────────────────
