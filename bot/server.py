@@ -79,6 +79,22 @@ def _read_json(path: Path, default=None):
     return default if default is not None else {}
 
 
+def _normalize_phone(raw) -> str:
+    """
+    Normalize any user-entered phone number to digits only (no +, spaces, dashes
+    or parentheses), so every format works — including a US number typed plainly
+    as 12342342345, or +1 (234) 234-2345, or 1-234-234-2345. The country code
+    MUST be included (e.g. leading 1 for the US). A leading '00' international
+    prefix is converted to nothing extra (kept as digits; Telegram accepts the
+    country code form). Returns '' if there are no digits.
+    """
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    # Drop a leading international call prefix like 00 (e.g. 0012342342345 -> 12342342345)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    return digits
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """
     Recursively merge override into base. Nested dicts are merged; lists and
@@ -305,9 +321,13 @@ def _broadcast_state():
 @app.route("/api/telegram/connect", methods=["POST"])
 def telegram_connect():
     data = request.get_json(force=True)
-    phone = (data.get("phone") or "").strip()
-    if not phone:
-        return jsonify({"success": False, "message": "Phone number required"}), 400
+    phone = _normalize_phone(data.get("phone"))
+    if len(phone) < 7:
+        return jsonify({
+            "success": False,
+            "message": "Enter a valid phone number WITH country code "
+                       "(e.g. 12342342345 for the US).",
+        }), 400
 
     config = _read_json(BASE_DIR / "config.json")
     api_id   = config.get("telegram", {}).get("api_id")
