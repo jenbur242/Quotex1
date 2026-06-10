@@ -1,7 +1,7 @@
 {
   "quotex": {
-    "email": "judesilas7777@gmail.com",
-    "password": "Jude3377",
+    "email": "",
+    "password": "",
     "login_wait_minutes": 1,
     "wait_between_trades": 30,
     "early_entry_seconds": 2
